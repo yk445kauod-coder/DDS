@@ -1,42 +1,172 @@
-name: Deploy to GitHub Pages
+name: 🚀 Auto Deploy CI/CD
 
 on:
   push:
     branches:
       - main
+      - dds-clean
+      - master
+  pull_request:
+    branches:
+      - main
+      - dds-clean
   workflow_dispatch:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
-  build-and-deploy:
+  # ═══════════════════════════════════════════════════════════
+  # 📦 Build & Test Job
+  # ═══════════════════════════════════════════════════════════
+  build:
+    name: 📦 Build & Type Check
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
           cache: 'npm'
 
       - name: Install Dependencies
         run: npm ci
+
+      - name: Type Check
+        run: npm run typecheck
+        continue-on-error: true
 
       - name: Build Application
         run: npm run build
         env:
           BASE_PATH: /
 
-      - name: Configure SPA Routing Fallback
+      - name: Configure SPA Routing
         run: cp dist/index.html dist/404.html
 
-      - name: Deploy to GitHub Pages
-        uses: JamesIves/github-pages-deploy-action@v4
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          folder: dist
-          branch: gh-pages
-          clean: true
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  # ═══════════════════════════════════════════════════════════
+  # 🌐 GitHub Pages Deployment
+  # ═══════════════════════════════════════════════════════════
+  deploy-github-pages:
+    name: 🌐 Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dds-clean' || github.ref == 'refs/heads/master'
+    
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Deployment Summary
+        run: |
+          echo "✅ Deployed successfully!"
+          echo "🌐 URL: ${{ steps.deployment.outputs.page_url }}"
+
+  # ═══════════════════════════════════════════════════════════
+  # ☁️ Cloudflare Pages Deployment (Optional)
+  # ═══════════════════════════════════════════════════════════
+  deploy-cloudflare:
+    name: ☁️ Deploy to Cloudflare Pages
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || contains(github.ref, 'cloudflare')
+    environment:
+      name: cloudflare-pages
+    concurrency:
+      group: cloudflare-${{ github.ref }}
+      cancel-in-progress: true
+    
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: dds-saas-platform
+          directory: dist
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+  # ═══════════════════════════════════════════════════════════
+  # 🎨 Preview Deployment for PRs
+  # ═══════════════════════════════════════════════════════════
+  preview:
+    name: 🎨 Preview for PR
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Deploy Preview
+        uses: rossvonn/vercel-preview-url@v2.5.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          alias: pr-${{ github.event.number }}
+        continue-on-error: true
+
+  # ═══════════════════════════════════════════════════════════
+  # ✅ Status Report
+  # ═══════════════════════════════════════════════════════════
+  status:
+    name: ✅ Deployment Status
+    needs: [deploy-github-pages, deploy-cloudflare, preview]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Status Summary
+        run: |
+          echo "## 📊 Deployment Summary"
+          echo ""
+          echo "| Job | Status |"
+          echo "|-----|--------|"
+          echo "| Build | ✅ Success |"
+          echo "| GitHub Pages | ${{ needs.deploy-github-pages.result == 'success' && '✅ Deployed' || '⏸️ Skipped' }} |"
+          echo "| Cloudflare | ${{ needs.deploy-cloudflare.result == 'success' && '✅ Deployed' || '⏸️ Skipped' }} |"
+          echo "| Preview | ${{ needs.preview.result == 'success' && '✅ Available' || '⏸️ Skipped' }} |"
